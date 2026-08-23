@@ -1,0 +1,9 @@
+.DS_Store
+.build/
+.swiftpm/
+Dependencies/
+local/
+*.sh
+**/.DS_Store
+libs/
+build/
