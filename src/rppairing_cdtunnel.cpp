@@ -7,6 +7,7 @@
 //
 
 #include "rppairing_cdtunnel.h"
+#include "rppairing_tcp.h"
 #include <cstring>
 #include <string>
 #include <sstream>
@@ -161,4 +162,45 @@ rppairing_error_t CdTunnel::recv_packet(uint8_t* buf, size_t buf_len, size_t* ou
     return RPPAIRING_E_SUCCESS;
 }
 
+
+void CdTunnel::register_stream(uint16_t local_port, VirtualTcpStream* stream) {
+    std::lock_guard<std::mutex> lock(streams_mutex_);
+    streams_[local_port] = stream;
+}
+
+void CdTunnel::unregister_stream(uint16_t local_port) {
+    std::lock_guard<std::mutex> lock(streams_mutex_);
+    streams_.erase(local_port);
+}
+
+int CdTunnel::dispatch_incoming_packet(int timeout_ms) {
+    uint8_t buf[16384];
+    size_t received = 0;
+    rppairing_error_t err = recv_packet(buf, sizeof(buf), &received, timeout_ms);
+    if (err != RPPAIRING_E_SUCCESS || received < 60) {
+        return 0;
+    }
+
+    // Verify IPv6 TCP (version 6, next-header 6)
+    if ((buf[0] >> 4) != 6 || buf[6] != 6) return 0;
+
+    uint16_t in_dst_port = (static_cast<uint16_t>(buf[42]) << 8) | buf[43];
+
+    VirtualTcpStream* target = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(streams_mutex_);
+        auto it = streams_.find(in_dst_port);
+        if (it != streams_.end()) {
+            target = it->second;
+        }
+    }
+
+    if (target) {
+        return target->handle_incoming_packet(buf, received);
+    }
+
+    return 0;
+}
+
 } // namespace rppairing
+

@@ -15,6 +15,7 @@
 #include <stddef.h>
 #include <vector>
 #include <string>
+#include <mutex>
 
 namespace rppairing {
 
@@ -36,6 +37,8 @@ public:
 
     bool is_connected() const { return connected_; }
 
+    int handle_incoming_packet(const uint8_t* buf, size_t received);
+
 private:
     CdTunnel& tunnel_;
     uint8_t client_ip6_[16];
@@ -47,9 +50,9 @@ private:
     bool connected_;
 
     std::vector<uint8_t> rx_buffer_;
+    std::mutex stream_mutex_;
 
     bool send_packet(uint8_t flags, const uint8_t* payload = NULL, size_t payload_len = 0);
-    int process_incoming(int timeout_ms);
     static uint16_t checksum(const uint8_t* ip6_src, const uint8_t* ip6_dst, uint32_t tcp_len, const uint8_t* tcp_hdr, size_t hdr_len, const uint8_t* payload, size_t payload_len);
 };
 

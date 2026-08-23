@@ -126,16 +126,9 @@ bool VirtualTcpStream::send_packet(uint8_t flags, const uint8_t* payload, size_t
     return (tunnel_.send_packet(packet, total_len) == RPPAIRING_E_SUCCESS);
 }
 
-int VirtualTcpStream::process_incoming(int timeout_ms) {
-    uint8_t buf[16384];
-    size_t received = 0;
-    rppairing_error_t err = tunnel_.recv_packet(buf, sizeof(buf), &received, timeout_ms);
-    if (err != RPPAIRING_E_SUCCESS || received < 60) {
-        return 0;
-    }
-
-    // Verify IPv6
-    if ((buf[0] >> 4) != 6 || buf[6] != 6) return 0; // Not TCP
+int VirtualTcpStream::handle_incoming_packet(const uint8_t* buf, size_t received) {
+    std::lock_guard<std::mutex> lock(stream_mutex_);
+    if (received < 60) return 0;
 
     uint16_t in_src_port = (static_cast<uint16_t>(buf[40]) << 8) | buf[41];
     uint16_t in_dst_port = (static_cast<uint16_t>(buf[42]) << 8) | buf[43];
@@ -167,7 +160,6 @@ int VirtualTcpStream::process_incoming(int timeout_ms) {
     }
 
     if (payload_len > 0) {
-        // std::cout << "[VirtualTcp] Recv DATA len=" << payload_len << " (seq=" << in_seq << "), sending ACK..." << std::endl;
         rx_buffer_.insert(rx_buffer_.end(), &buf[payload_offset], &buf[payload_offset + payload_len]);
         ack_num_ = in_seq + payload_len;
         send_packet(TCP_ACK);
@@ -197,9 +189,9 @@ bool VirtualTcpStream::connect(const std::string& server_ip6, uint16_t dest_port
     if (inet_pton(AF_INET6, info->client_address, client_ip6_) != 1) return false;
     if (inet_pton(AF_INET6, server_ip6.c_str(), server_ip6_) != 1) return false;
 
-    // Pick a random ephemeral source port 49152-65535
-    std::random_device rd;
-    std::mt19937 gen(rd());
+    // Pick a random ephemeral source port 50000-65000
+    static std::random_device rd;
+    static std::mt19937 gen(rd());
     std::uniform_int_distribution<uint16_t> port_dis(50000, 65000);
     std::uniform_int_distribution<uint32_t> seq_dis(10000, 1000000);
 
@@ -207,19 +199,28 @@ bool VirtualTcpStream::connect(const std::string& server_ip6, uint16_t dest_port
     dst_port_ = dest_port;
     seq_num_ = seq_dis(gen);
     ack_num_ = 0;
+    connected_ = false;
+
+    tunnel_.register_stream(src_port_, this);
 
     // Send SYN
     std::cout << "[VirtualTcp] Sending SYN from port " << src_port_ << " to port " << dst_port_ << " (seq " << seq_num_ << ")..." << std::endl;
-    if (!send_packet(TCP_SYN)) return false;
+    if (!send_packet(TCP_SYN)) {
+        tunnel_.unregister_stream(src_port_);
+        return false;
+    }
 
     // Wait for SYN-ACK
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     while (std::chrono::steady_clock::now() < deadline) {
-        int res = process_incoming(100);
-        if (res > 0 && connected_) {
+        tunnel_.dispatch_incoming_packet(100);
+        if (connected_) {
             return true;
         }
-        if (res < 0) return false;
+    }
+
+    if (!connected_) {
+        tunnel_.unregister_stream(src_port_);
     }
 
     return connected_;
@@ -231,6 +232,11 @@ void VirtualTcpStream::close() {
         seq_num_++;
         connected_ = false;
     }
+    if (src_port_ != 0) {
+        tunnel_.unregister_stream(src_port_);
+        src_port_ = 0;
+    }
+    std::lock_guard<std::mutex> lock(stream_mutex_);
     rx_buffer_.clear();
 }
 
@@ -248,32 +254,39 @@ bool VirtualTcpStream::send(const uint8_t* data, size_t len) {
 
         // Drain pending ACKs periodically to maintain smooth TCP window flow
         if (unacked_bytes >= 32768) {
-            while (process_incoming(0) > 0) {}
+            while (tunnel_.dispatch_incoming_packet(0) > 0) {}
             unacked_bytes = 0;
         }
     }
-    while (process_incoming(0) > 0) {}
+    while (tunnel_.dispatch_incoming_packet(0) > 0) {}
     return true;
 }
 
 int VirtualTcpStream::recv(uint8_t* buf, size_t max_len, int timeout_ms) {
-    if (!rx_buffer_.empty()) {
-        size_t to_copy = std::min(max_len, rx_buffer_.size());
-        std::memcpy(buf, rx_buffer_.data(), to_copy);
-        rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.begin() + to_copy);
-        return static_cast<int>(to_copy);
-    }
-
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-    while (std::chrono::steady_clock::now() < deadline) {
-        int r = process_incoming(100);
+    {
+        std::lock_guard<std::mutex> lock(stream_mutex_);
         if (!rx_buffer_.empty()) {
             size_t to_copy = std::min(max_len, rx_buffer_.size());
             std::memcpy(buf, rx_buffer_.data(), to_copy);
             rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.begin() + to_copy);
             return static_cast<int>(to_copy);
         }
-        if (r < 0) return -1;
+        if (!connected_) return -1;
+    }
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        tunnel_.dispatch_incoming_packet(100);
+        {
+            std::lock_guard<std::mutex> lock(stream_mutex_);
+            if (!rx_buffer_.empty()) {
+                size_t to_copy = std::min(max_len, rx_buffer_.size());
+                std::memcpy(buf, rx_buffer_.data(), to_copy);
+                rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.begin() + to_copy);
+                return static_cast<int>(to_copy);
+            }
+            if (!connected_) return -1;
+        }
     }
     return 0; // Timeout
 }
