@@ -28,6 +28,7 @@ public:
 
     int send(const uint8_t* data, size_t len);
     int recv(uint8_t* buf, size_t len, int timeout_ms = 5000);
+    bool recv_exact(uint8_t* buf, size_t len, int timeout_ms = 5000);
 
     const std::vector<uint8_t>& psk() const { return psk_; }
 

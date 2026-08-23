@@ -6,6 +6,7 @@
 //  Copyright © 2026 Magesh K. All rights reserved.
 //
 
+#include "rppairing_rsd.h"
 #include "rppairing/rppairing.h"
 #include "rppairing_crypto.h"
 #include "rppairing_tlv8.h"
@@ -588,6 +589,139 @@ void rppairing_tunnel_close(rppairing_tunnel_t tunnel) {
     if (tunnel) {
         tunnel->tunnel.close();
         delete tunnel;
+    }
+}
+
+struct rppairing_rsd_s {
+    rppairing::RsdClient client;
+    rppairing_rsd_s(rppairing::CdTunnel& tunnel) : client(tunnel) {}
+};
+
+rppairing_error_t rppairing_rsd_connect(rppairing_tunnel_t tunnel, rppairing_rsd_t *rsd) {
+    if (!tunnel || !rsd) return RPPAIRING_E_INVALID_ARG;
+    const rppairing_tunnel_info_t *info = tunnel->tunnel.info();
+    if (!info || info->server_rsd_port == 0) return RPPAIRING_E_INVALID_ARG;
+
+    rppairing_rsd_s *r = new rppairing_rsd_s(tunnel->tunnel);
+    rppairing_error_t err = r->client.connect(info->server_address, info->server_rsd_port, 10000);
+    if (err != RPPAIRING_E_SUCCESS) {
+        delete r;
+        return err;
+    }
+    *rsd = r;
+    return RPPAIRING_E_SUCCESS;
+}
+
+rppairing_error_t rppairing_rsd_get_service_port(rppairing_rsd_t rsd, const char *service_name, uint16_t *port) {
+    if (!rsd || !service_name || !port) return RPPAIRING_E_INVALID_ARG;
+    uint16_t p = rsd->client.get_service_port(service_name);
+    if (p == 0) return RPPAIRING_E_TUNNEL_FAILED;
+    *port = p;
+    return RPPAIRING_E_SUCCESS;
+}
+
+void rppairing_rsd_free(rppairing_rsd_t rsd) {
+    if (rsd) {
+        delete rsd;
+    }
+}
+
+struct rppairing_service_stream_s {
+    rppairing::VirtualTcpStream tcp;
+    rppairing_service_stream_s(rppairing::CdTunnel& tunnel) : tcp(tunnel) {}
+};
+
+rppairing_error_t rppairing_connect_service_stream(
+    rppairing_tunnel_t tunnel,
+    uint16_t service_port,
+    rppairing_service_stream_t *stream
+) {
+    if (!tunnel || service_port == 0 || !stream) return RPPAIRING_E_INVALID_ARG;
+    const rppairing_tunnel_info_t *info = tunnel->tunnel.info();
+    if (!info) return RPPAIRING_E_INVALID_ARG;
+
+    rppairing_service_stream_s *s = new rppairing_service_stream_s(tunnel->tunnel);
+    if (!s->tcp.connect(info->server_address, service_port, 10000)) {
+        delete s;
+        return RPPAIRING_E_CONN_FAILED;
+    }
+    *stream = s;
+    return RPPAIRING_E_SUCCESS;
+}
+
+rppairing_error_t rppairing_service_stream_send_plist(
+    rppairing_service_stream_t stream,
+    const char *plist_xml,
+    size_t xml_len
+) {
+    if (!stream || !plist_xml || xml_len == 0) return RPPAIRING_E_INVALID_ARG;
+
+    uint32_t be_len = static_cast<uint32_t>(xml_len);
+    uint8_t hdr[4] = {
+        static_cast<uint8_t>((be_len >> 24) & 0xFF),
+        static_cast<uint8_t>((be_len >> 16) & 0xFF),
+        static_cast<uint8_t>((be_len >> 8) & 0xFF),
+        static_cast<uint8_t>(be_len & 0xFF)
+    };
+
+    if (!stream->tcp.send(hdr, 4)) return RPPAIRING_E_CONN_FAILED;
+    if (!stream->tcp.send(reinterpret_cast<const uint8_t*>(plist_xml), xml_len)) return RPPAIRING_E_CONN_FAILED;
+    return RPPAIRING_E_SUCCESS;
+}
+
+rppairing_error_t rppairing_service_stream_recv_plist(
+    rppairing_service_stream_t stream,
+    char **out_plist_xml,
+    size_t *out_xml_len,
+    int timeout_ms
+) {
+    if (!stream || !out_plist_xml || !out_xml_len) return RPPAIRING_E_INVALID_ARG;
+
+    uint8_t hdr[4];
+    if (!stream->tcp.recv_exact(hdr, 4, timeout_ms)) return RPPAIRING_E_TIMEOUT;
+
+    uint32_t len = (static_cast<uint32_t>(hdr[0]) << 24) | (static_cast<uint32_t>(hdr[1]) << 16) | (static_cast<uint32_t>(hdr[2]) << 8) | hdr[3];
+    if (len == 0 || len > 10 * 1024 * 1024) return RPPAIRING_E_MALFORMED_TLV;
+
+    char *buf = static_cast<char*>(std::malloc(len + 1));
+    if (!buf) return RPPAIRING_E_CRYPTO_ERROR;
+
+    if (!stream->tcp.recv_exact(reinterpret_cast<uint8_t*>(buf), len, timeout_ms)) {
+        std::free(buf);
+        return RPPAIRING_E_TIMEOUT;
+    }
+    buf[len] = '\0';
+
+    *out_plist_xml = buf;
+    *out_xml_len = len;
+    return RPPAIRING_E_SUCCESS;
+}
+
+rppairing_error_t rppairing_service_stream_send_raw(
+    rppairing_service_stream_t stream,
+    const uint8_t *data,
+    size_t len
+) {
+    if (!stream || !data || len == 0) return RPPAIRING_E_INVALID_ARG;
+    if (!stream->tcp.send(data, len)) return RPPAIRING_E_CONN_FAILED;
+    return RPPAIRING_E_SUCCESS;
+}
+
+rppairing_error_t rppairing_service_stream_recv_exact(
+    rppairing_service_stream_t stream,
+    uint8_t *buf,
+    size_t len,
+    int timeout_ms
+) {
+    if (!stream || !buf || len == 0) return RPPAIRING_E_INVALID_ARG;
+    if (!stream->tcp.recv_exact(buf, len, timeout_ms)) return RPPAIRING_E_TIMEOUT;
+    return RPPAIRING_E_SUCCESS;
+}
+
+void rppairing_service_stream_close(rppairing_service_stream_t stream) {
+    if (stream) {
+        stream->tcp.close();
+        delete stream;
     }
 }
 

@@ -133,9 +133,9 @@ rppairing_error_t CdTunnel::recv_packet(uint8_t* buf, size_t buf_len, size_t* ou
     // IPv6 header is 40 bytes fixed
     if (buf_len < 40) return RPPAIRING_E_INVALID_ARG;
 
-    int r = tls_client_.recv(buf, 40, timeout_ms);
-    if (r <= 0) return RPPAIRING_E_TIMEOUT;
-    if (r < 40) return RPPAIRING_E_TUNNEL_FAILED;
+    if (!tls_client_.recv_exact(buf, 40, timeout_ms)) {
+        return RPPAIRING_E_TIMEOUT;
+    }
 
     // Bytes [4:6] are Payload Length (big-endian)
     uint16_t payload_len = (static_cast<uint16_t>(buf[4]) << 8) | static_cast<uint16_t>(buf[5]);
@@ -145,11 +145,10 @@ rppairing_error_t CdTunnel::recv_packet(uint8_t* buf, size_t buf_len, size_t* ou
         return RPPAIRING_E_INVALID_ARG;
     }
 
-    size_t total_read = 40;
-    while (total_read < total_packet_len) {
-        r = tls_client_.recv(buf + total_read, total_packet_len - total_read, timeout_ms);
-        if (r <= 0) return RPPAIRING_E_TUNNEL_FAILED;
-        total_read += r;
+    if (payload_len > 0) {
+        if (!tls_client_.recv_exact(buf + 40, payload_len, timeout_ms)) {
+            return RPPAIRING_E_TUNNEL_FAILED;
+        }
     }
 
     if (out_received) {

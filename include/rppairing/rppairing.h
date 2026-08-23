@@ -69,6 +69,49 @@ rppairing_error_t rppairing_tunnel_send_packet(rppairing_tunnel_t tunnel, const 
 rppairing_error_t rppairing_tunnel_recv_packet(rppairing_tunnel_t tunnel, uint8_t *buf, size_t buf_len, size_t *received_len, int timeout_ms);
 void rppairing_tunnel_close(rppairing_tunnel_t tunnel);
 
+// RSD Client
+typedef struct rppairing_rsd_s* rppairing_rsd_t;
+rppairing_error_t rppairing_rsd_connect(rppairing_tunnel_t tunnel, rppairing_rsd_t *rsd);
+rppairing_error_t rppairing_rsd_get_service_port(rppairing_rsd_t rsd, const char *service_name, uint16_t *port);
+void rppairing_rsd_free(rppairing_rsd_t rsd);
+
+// Generic Service Stream over CDTunnel
+typedef struct rppairing_service_stream_s* rppairing_service_stream_t;
+
+rppairing_error_t rppairing_connect_service_stream(
+    rppairing_tunnel_t tunnel,
+    uint16_t service_port,
+    rppairing_service_stream_t *stream
+);
+
+rppairing_error_t rppairing_service_stream_send_plist(
+    rppairing_service_stream_t stream,
+    const char *plist_xml,
+    size_t xml_len
+);
+
+rppairing_error_t rppairing_service_stream_recv_plist(
+    rppairing_service_stream_t stream,
+    char **out_plist_xml,
+    size_t *out_xml_len,
+    int timeout_ms
+);
+
+rppairing_error_t rppairing_service_stream_send_raw(
+    rppairing_service_stream_t stream,
+    const uint8_t *data,
+    size_t len
+);
+
+rppairing_error_t rppairing_service_stream_recv_exact(
+    rppairing_service_stream_t stream,
+    uint8_t *buf,
+    size_t len,
+    int timeout_ms
+);
+
+void rppairing_service_stream_close(rppairing_service_stream_t stream);
+
 #ifdef __cplusplus
 }
 #endif

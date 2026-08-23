@@ -34,6 +34,7 @@ public:
 
     void close();
     bool is_open() const { return tls_client_.is_connected(); }
+    const rppairing_tunnel_info_t* info() const { return &info_; }
 
     rppairing_error_t send_packet(const uint8_t* packet, size_t len);
     rppairing_error_t recv_packet(uint8_t* buf, size_t buf_len, size_t* out_received, int timeout_ms = 5000);

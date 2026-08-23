@@ -154,6 +154,16 @@ int TlsPskClient::send(const uint8_t* data, size_t len) {
     return SSL_write(ssl_, data, static_cast<int>(len));
 }
 
+bool TlsPskClient::recv_exact(uint8_t* buf, size_t len, int timeout_ms) {
+    size_t total = 0;
+    while (total < len) {
+        int r = recv(buf + total, len - total, timeout_ms);
+        if (r <= 0) return false;
+        total += r;
+    }
+    return true;
+}
+
 int TlsPskClient::recv(uint8_t* buf, size_t len, int timeout_ms) {
     if (!ssl_ || fd_ < 0) return -1;
 
