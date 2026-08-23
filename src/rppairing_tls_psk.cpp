@@ -50,7 +50,6 @@ TlsPskClient::~TlsPskClient() {
 }
 
 bool TlsPskClient::connect(const char* host, uint16_t port, const uint8_t* psk, size_t psk_len, int timeout_ms) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
     disconnect();
     psk_.assign(psk, psk + psk_len);
 
@@ -140,7 +139,6 @@ bool TlsPskClient::connect(const char* host, uint16_t port, const uint8_t* psk, 
 }
 
 void TlsPskClient::disconnect() {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (ssl_) {
         SSL_shutdown(ssl_);
         SSL_free(ssl_);
@@ -158,7 +156,6 @@ void TlsPskClient::disconnect() {
 }
 
 int TlsPskClient::send(const uint8_t* data, size_t len) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!ssl_ || fd_ == kInvalidSocket) return -1;
     return SSL_write(ssl_, data, static_cast<int>(len));
 }
@@ -174,7 +171,6 @@ bool TlsPskClient::recv_exact(uint8_t* buf, size_t len, int timeout_ms) {
 }
 
 int TlsPskClient::recv(uint8_t* buf, size_t len, int timeout_ms) {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!ssl_ || fd_ == kInvalidSocket) return -1;
 
     if (SSL_pending(ssl_) == 0) {

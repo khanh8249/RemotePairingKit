@@ -12,7 +12,6 @@
 #include <vector>
 #include <cstdint>
 #include <cstddef>
-#include <mutex>
 #include <openssl/ssl.h>
 
 namespace rppairing {
@@ -28,7 +27,7 @@ public:
     // Connects to device_host:port and negotiates TLS 1.2 PSK with the given key
     bool connect(const char* host, uint16_t port, const uint8_t* psk, size_t psk_len, int timeout_ms = 5000);
     void disconnect();
-    bool is_connected() const { std::lock_guard<std::recursive_mutex> lock(mutex_); return (ssl_ != NULL && fd_ != kInvalidSocket); }
+    bool is_connected() const { return (ssl_ != NULL && fd_ != kInvalidSocket); }
 
     int send(const uint8_t* data, size_t len);
     int recv(uint8_t* buf, size_t len, int timeout_ms = 5000);
@@ -41,7 +40,6 @@ private:
     SSL_CTX* ctx_;
     SSL* ssl_;
     std::vector<uint8_t> psk_;
-    mutable std::recursive_mutex mutex_;
 };
 
 } // namespace rppairing

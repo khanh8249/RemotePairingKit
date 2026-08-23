@@ -50,6 +50,10 @@ CdTunnel::~CdTunnel() {
 
 void CdTunnel::close() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
+    {
+        std::lock_guard<std::mutex> s_lock(streams_mutex_);
+        streams_.clear();
+    }
     tls_client_.disconnect();
     std::memset(&info_, 0, sizeof(info_));
 }
