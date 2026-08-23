@@ -585,6 +585,11 @@ rppairing_error_t rppairing_tunnel_recv_packet(rppairing_tunnel_t tunnel, uint8_
     return tunnel->tunnel.recv_packet(buf, buf_len, received_len, timeout_ms);
 }
 
+bool rppairing_tunnel_is_open(rppairing_tunnel_t tunnel) {
+    if (!tunnel) return false;
+    return tunnel->tunnel.is_open();
+}
+
 void rppairing_tunnel_close(rppairing_tunnel_t tunnel) {
     if (tunnel) {
         tunnel->tunnel.close();

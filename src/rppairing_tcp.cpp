@@ -23,7 +23,9 @@ static const uint8_t TCP_PSH = 0x08;
 static const uint8_t TCP_ACK = 0x10;
 
 VirtualTcpStream::VirtualTcpStream(CdTunnel& tunnel)
-    : tunnel_(tunnel), src_port_(0), dst_port_(0), seq_num_(0), ack_num_(0), connected_(false) {
+    : tunnel_(tunnel), src_port_(0), dst_port_(0), seq_num_(0), ack_num_(0),
+      peer_ack_num_(0), peer_window_(kTcpDefaultWindowSize), connected_(false),
+      bytes_in_flight_(0) {
     std::memset(client_ip6_, 0, sizeof(client_ip6_));
     std::memset(server_ip6_, 0, sizeof(server_ip6_));
 }
@@ -68,7 +70,7 @@ uint16_t VirtualTcpStream::checksum(
     return static_cast<uint16_t>(~sum);
 }
 
-bool VirtualTcpStream::send_packet(uint8_t flags, const uint8_t* payload, size_t payload_len) {
+bool VirtualTcpStream::send_packet(uint8_t flags, const uint8_t* payload, size_t payload_len, int64_t custom_seq) {
     uint16_t tcp_len = 20 + payload_len;
     uint16_t total_len = 40 + tcp_len;
 
@@ -92,16 +94,18 @@ bool VirtualTcpStream::send_packet(uint8_t flags, const uint8_t* payload, size_t
     std::memcpy(&packet[8], client_ip6_, 16);
     std::memcpy(&packet[24], server_ip6_, 16);
 
+    uint32_t effective_seq = (custom_seq >= 0) ? static_cast<uint32_t>(custom_seq) : seq_num_;
+
     // TCP Header (20 bytes)
     uint8_t* tcp = &packet[40];
     tcp[0] = static_cast<uint8_t>((src_port_ >> 8) & 0xFF);
     tcp[1] = static_cast<uint8_t>(src_port_ & 0xFF);
     tcp[2] = static_cast<uint8_t>((dst_port_ >> 8) & 0xFF);
     tcp[3] = static_cast<uint8_t>(dst_port_ & 0xFF);
-    tcp[4] = static_cast<uint8_t>((seq_num_ >> 24) & 0xFF);
-    tcp[5] = static_cast<uint8_t>((seq_num_ >> 16) & 0xFF);
-    tcp[6] = static_cast<uint8_t>((seq_num_ >> 8) & 0xFF);
-    tcp[7] = static_cast<uint8_t>(seq_num_ & 0xFF);
+    tcp[4] = static_cast<uint8_t>((effective_seq >> 24) & 0xFF);
+    tcp[5] = static_cast<uint8_t>((effective_seq >> 16) & 0xFF);
+    tcp[6] = static_cast<uint8_t>((effective_seq >> 8) & 0xFF);
+    tcp[7] = static_cast<uint8_t>(effective_seq & 0xFF);
     tcp[8] = static_cast<uint8_t>((ack_num_ >> 24) & 0xFF);
     tcp[9] = static_cast<uint8_t>((ack_num_ >> 16) & 0xFF);
     tcp[10] = static_cast<uint8_t>((ack_num_ >> 8) & 0xFF);
@@ -127,7 +131,12 @@ bool VirtualTcpStream::send_packet(uint8_t flags, const uint8_t* payload, size_t
 }
 
 int VirtualTcpStream::handle_incoming_packet(const uint8_t* buf, size_t received) {
-    std::lock_guard<std::mutex> lock(stream_mutex_);
+    if (!buf || received == 0) {
+        std::lock_guard<std::mutex> lock(stream_mutex_);
+        connected_ = false;
+        cv_.notify_all();
+        return -1;
+    }
     if (received < 60) return 0;
 
     uint16_t in_src_port = (static_cast<uint16_t>(buf[40]) << 8) | buf[41];
@@ -136,7 +145,9 @@ int VirtualTcpStream::handle_incoming_packet(const uint8_t* buf, size_t received
     if (in_src_port != dst_port_ || in_dst_port != src_port_) return 0;
 
     uint32_t in_seq = (static_cast<uint32_t>(buf[44]) << 24) | (static_cast<uint32_t>(buf[45]) << 16) | (static_cast<uint32_t>(buf[46]) << 8) | buf[47];
+    uint32_t in_ack = (static_cast<uint32_t>(buf[48]) << 24) | (static_cast<uint32_t>(buf[49]) << 16) | (static_cast<uint32_t>(buf[50]) << 8) | buf[51];
     uint8_t in_flags = buf[53];
+    uint16_t in_win = (static_cast<uint16_t>(buf[54]) << 8) | buf[55];
     uint8_t tcp_hdr_len = (buf[52] >> 4) * 4;
 
     size_t payload_offset = 40 + tcp_hdr_len;
@@ -145,39 +156,83 @@ int VirtualTcpStream::handle_incoming_packet(const uint8_t* buf, size_t received
         payload_len = received - payload_offset;
     }
 
-    if (in_flags & TCP_RST) {
-        connected_ = false;
-        return -1;
+    bool send_ack = false;
+    bool send_syn_ack = false;
+    bool notify = false;
+    int result = 0;
+
+    {
+        std::lock_guard<std::mutex> lock(stream_mutex_);
+
+        if (in_flags & TCP_ACK) {
+            peer_ack_num_ = in_ack;
+            // Drain acknowledged segments from unacked queue (matching jktcp adapter.rs)
+            while (!unacked_.empty()) {
+                const auto& seg = unacked_.front();
+                uint32_t seg_end = seg.seq + static_cast<uint32_t>(seg.data.size());
+                if (static_cast<int32_t>(in_ack - seg_end) >= 0) {
+                    bytes_in_flight_ = (bytes_in_flight_ >= seg.data.size()) ? (bytes_in_flight_ - seg.data.size()) : 0;
+                    unacked_.pop_front();
+                } else {
+                    break;
+                }
+            }
+
+            uint32_t scaled_win = static_cast<uint32_t>(in_win) << 6;
+            peer_window_ = std::max<uint32_t>(scaled_win, kTcpDefaultWindowSize);
+            notify = true;
+        }
+
+        if (in_flags & TCP_RST) {
+            connected_ = false;
+            cv_.notify_all();
+            return -1;
+        }
+
+        if ((in_flags & TCP_SYN) && (in_flags & TCP_ACK)) {
+            ack_num_ = in_seq + 1;
+            seq_num_++;
+            peer_ack_num_ = in_ack;
+            connected_ = true;
+            send_syn_ack = true;
+            notify = true;
+            result = 1;
+        } else if (payload_len > 0) {
+            if (in_seq == ack_num_) {
+                // Expected in-order segment: accept and buffer
+                rx_buffer_.insert(rx_buffer_.end(), &buf[payload_offset], &buf[payload_offset + payload_len]);
+                ack_num_ = in_seq + payload_len;
+                send_ack = true;
+                notify = true;
+                result = static_cast<int>(payload_len);
+            } else if (static_cast<int32_t>(ack_num_ - in_seq) > 0) {
+                // Duplicate segment: re-ACK without duplicate buffering (jktcp)
+                send_ack = true;
+            }
+        } else if (in_flags & TCP_FIN) {
+            ack_num_ = in_seq + 1;
+            connected_ = false;
+            send_ack = true;
+            notify = true;
+            result = -1;
+        } else if (in_flags & TCP_ACK) {
+            result = 2; // Pure ACK processed
+        }
     }
 
-    if ((in_flags & TCP_SYN) && (in_flags & TCP_ACK)) {
+    // Call send_packet outside stream_mutex_ to avoid lock contention / inversion
+    if (send_syn_ack) {
         std::cout << "[VirtualTcp] Received SYN-ACK from port " << in_src_port << "! Sending ACK..." << std::endl;
-        ack_num_ = in_seq + 1;
-        seq_num_++;
         send_packet(TCP_ACK);
-        connected_ = true;
-        return 1;
-    }
-
-    if (payload_len > 0) {
-        rx_buffer_.insert(rx_buffer_.end(), &buf[payload_offset], &buf[payload_offset + payload_len]);
-        ack_num_ = in_seq + payload_len;
+    } else if (send_ack) {
         send_packet(TCP_ACK);
-        return static_cast<int>(payload_len);
     }
 
-    if (in_flags & TCP_FIN) {
-        ack_num_ = in_seq + 1;
-        send_packet(TCP_ACK);
-        connected_ = false;
-        return -1;
+    if (notify) {
+        cv_.notify_all();
     }
 
-    if (in_flags & TCP_ACK) {
-        return 2; // Pure ACK processed
-    }
-
-    return 0;
+    return result;
 }
 
 bool VirtualTcpStream::connect(const std::string& server_ip6, uint16_t dest_port, int timeout_ms) {
@@ -189,9 +244,9 @@ bool VirtualTcpStream::connect(const std::string& server_ip6, uint16_t dest_port
     if (inet_pton(AF_INET6, info->client_address, client_ip6_) != 1) return false;
     if (inet_pton(AF_INET6, server_ip6.c_str(), server_ip6_) != 1) return false;
 
-    // Pick a random ephemeral source port 50000-65000
-    static std::random_device rd;
-    static std::mt19937 gen(rd());
+    // Pick a random ephemeral source port 50000-65000 (thread-safe)
+    thread_local static std::random_device rd;
+    thread_local static std::mt19937 gen(rd());
     std::uniform_int_distribution<uint16_t> port_dis(50000, 65000);
     std::uniform_int_distribution<uint32_t> seq_dis(10000, 1000000);
 
@@ -199,6 +254,11 @@ bool VirtualTcpStream::connect(const std::string& server_ip6, uint16_t dest_port
     dst_port_ = dest_port;
     seq_num_ = seq_dis(gen);
     ack_num_ = 0;
+    peer_ack_num_ = seq_num_;
+    peer_window_ = kTcpDefaultWindowSize;
+    mss_ = (info->mtu > 60) ? (info->mtu - 60) : kTcpDefaultMss;
+    unacked_.clear();
+    bytes_in_flight_ = 0;
     connected_ = false;
 
     tunnel_.register_stream(src_port_, this);
@@ -210,17 +270,15 @@ bool VirtualTcpStream::connect(const std::string& server_ip6, uint16_t dest_port
         return false;
     }
 
-    // Wait for SYN-ACK
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-    while (std::chrono::steady_clock::now() < deadline) {
-        tunnel_.dispatch_incoming_packet(100);
-        if (connected_) {
-            return true;
-        }
-    }
+    // Wait for SYN-ACK event (zero polling)
+    std::unique_lock<std::mutex> lock(stream_mutex_);
+    cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), [this] { return connected_; });
 
     if (!connected_) {
+        std::cout << "[VirtualTcp] SYN timeout on port " << src_port_ << std::endl;
         tunnel_.unregister_stream(src_port_);
+    } else {
+        std::cout << "[VirtualTcp] Stream connected successfully on port " << src_port_ << " to " << dst_port_ << std::endl;
     }
 
     return connected_;
@@ -238,65 +296,96 @@ void VirtualTcpStream::close() {
     }
     std::lock_guard<std::mutex> lock(stream_mutex_);
     rx_buffer_.clear();
+    unacked_.clear();
+    bytes_in_flight_ = 0;
+    cv_.notify_all();
 }
 
 bool VirtualTcpStream::send(const uint8_t* data, size_t len) {
     if (!connected_) return false;
 
     size_t sent = 0;
-    size_t unacked_bytes = 0;
     while (sent < len) {
-        size_t chunk = std::min(len - sent, kTcpMss);
-        if (!send_packet(TCP_PSH | TCP_ACK, data + sent, chunk)) return false;
-        seq_num_ += chunk;
-        sent += chunk;
-        unacked_bytes += chunk;
+        size_t effective_window = std::min<size_t>(kTcpDefaultSendWindow, peer_window_);
+        size_t chunk_len = std::min(len - sent, mss_);
+        uint32_t current_seq = 0;
 
-        // Drain pending ACKs periodically to maintain smooth TCP window flow
-        if (unacked_bytes >= 32768) {
-            while (tunnel_.dispatch_incoming_packet(0) > 0) {}
-            unacked_bytes = 0;
+        {
+            std::unique_lock<std::mutex> lock(stream_mutex_);
+            while (connected_ && bytes_in_flight_ >= effective_window) {
+                uint64_t current_rto_ms = kTcpInitialRtoMs;
+                if (!unacked_.empty()) {
+                    current_rto_ms = kTcpInitialRtoMs << std::min<uint32_t>(unacked_.front().retries, 6);
+                }
+
+                if (cv_.wait_for(lock, std::chrono::milliseconds(current_rto_ms)) == std::cv_status::timeout) {
+                    if (!unacked_.empty()) {
+                        auto& head = unacked_.front();
+                        if (head.retries >= kTcpMaxRetries) {
+                            connected_ = false;
+                            return false;
+                        }
+                        head.retries++;
+                        head.sent_at = std::chrono::steady_clock::now();
+                        send_packet(TCP_PSH | TCP_ACK, head.data.data(), head.data.size(), head.seq);
+                    }
+                }
+            }
+            if (!connected_) return false;
+
+            current_seq = seq_num_;
+            UnackedSegment seg;
+            seg.seq = current_seq;
+            seg.data.assign(data + sent, data + sent + chunk_len);
+            seg.sent_at = std::chrono::steady_clock::now();
+            seg.retries = 0;
+
+            unacked_.push_back(std::move(seg));
+            bytes_in_flight_ += chunk_len;
+            seq_num_ += chunk_len;
         }
+
+        if (!send_packet(TCP_PSH | TCP_ACK, data + sent, chunk_len, current_seq)) {
+            std::lock_guard<std::mutex> lock(stream_mutex_);
+            connected_ = false;
+            cv_.notify_all();
+            return false;
+        }
+
+        sent += chunk_len;
     }
-    while (tunnel_.dispatch_incoming_packet(0) > 0) {}
     return true;
 }
 
 int VirtualTcpStream::recv(uint8_t* buf, size_t max_len, int timeout_ms) {
-    {
-        std::lock_guard<std::mutex> lock(stream_mutex_);
-        if (!rx_buffer_.empty()) {
-            size_t to_copy = std::min(max_len, rx_buffer_.size());
-            std::memcpy(buf, rx_buffer_.data(), to_copy);
-            rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.begin() + to_copy);
-            return static_cast<int>(to_copy);
-        }
-        if (!connected_) return -1;
+    std::unique_lock<std::mutex> lock(stream_mutex_);
+
+    // Wait for incoming packet event (zero polling)
+    cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), [this] {
+        return !rx_buffer_.empty() || !connected_;
+    });
+
+    if (!rx_buffer_.empty()) {
+        size_t to_copy = std::min(max_len, rx_buffer_.size());
+        std::memcpy(buf, rx_buffer_.data(), to_copy);
+        rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.begin() + to_copy);
+        return static_cast<int>(to_copy);
     }
 
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-    while (std::chrono::steady_clock::now() < deadline) {
-        tunnel_.dispatch_incoming_packet(100);
-        {
-            std::lock_guard<std::mutex> lock(stream_mutex_);
-            if (!rx_buffer_.empty()) {
-                size_t to_copy = std::min(max_len, rx_buffer_.size());
-                std::memcpy(buf, rx_buffer_.data(), to_copy);
-                rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.begin() + to_copy);
-                return static_cast<int>(to_copy);
-            }
-            if (!connected_) return -1;
-        }
-    }
+    if (!connected_) return -1;
     return 0; // Timeout
 }
 
 bool VirtualTcpStream::recv_exact(uint8_t* buf, size_t len, int timeout_ms) {
     size_t total = 0;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     while (total < len) {
-        int r = recv(buf + total, len - total, timeout_ms);
-        if (r <= 0) return false;
-        total += r;
+        int rem_ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count());
+        if (rem_ms <= 0) return false;
+
+        int r = recv(buf + total, len - total, rem_ms);
+        if (r < 0) return false;
+        if (r > 0) total += r;
     }
     return true;
 }

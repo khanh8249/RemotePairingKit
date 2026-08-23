@@ -7,3 +7,4 @@ local/
 **/.DS_Store
 libs/
 build/
+tools/test_tcp

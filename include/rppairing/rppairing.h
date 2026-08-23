@@ -11,6 +11,7 @@
 
 #include "rppairing_types.h"
 #include "rppairing_file.h"
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -67,6 +68,7 @@ rppairing_error_t rppairing_tunnel_connect(
 // Send/Receive raw IPv6 packets over CDTunnel
 rppairing_error_t rppairing_tunnel_send_packet(rppairing_tunnel_t tunnel, const uint8_t *packet, size_t len);
 rppairing_error_t rppairing_tunnel_recv_packet(rppairing_tunnel_t tunnel, uint8_t *buf, size_t buf_len, size_t *received_len, int timeout_ms);
+bool rppairing_tunnel_is_open(rppairing_tunnel_t tunnel);
 void rppairing_tunnel_close(rppairing_tunnel_t tunnel);
 
 // RSD Client

@@ -16,6 +16,8 @@
 #include <cstddef>
 #include <mutex>
 #include <unordered_map>
+#include <thread>
+#include <atomic>
 
 namespace rppairing {
 
@@ -44,22 +46,28 @@ public:
     bool is_open() const { return tls_client_.is_connected(); }
     const rppairing_tunnel_info_t* info() const { return &info_; }
 
-    rppairing_error_t send_packet(const uint8_t* packet, size_t len);
-    rppairing_error_t recv_packet(uint8_t* buf, size_t buf_len, size_t* out_received, int timeout_ms = 5000);
+    virtual rppairing_error_t send_packet(const uint8_t* packet, size_t len);
+    virtual rppairing_error_t recv_packet(uint8_t* buf, size_t buf_len, size_t* out_received, int timeout_ms = 5000);
 
     // Multi-stream demuxing
-    void register_stream(uint16_t local_port, VirtualTcpStream* stream);
-    void unregister_stream(uint16_t local_port);
-    int dispatch_incoming_packet(int timeout_ms = 100);
-
-    std::recursive_mutex& mutex() { return mutex_; }
+    virtual void register_stream(uint16_t local_port, VirtualTcpStream* stream);
+    virtual void unregister_stream(uint16_t local_port);
+    size_t active_stream_count() const {
+        std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(streams_mutex_));
+        return streams_.size();
+    }
 
 private:
+    void reader_loop();
+
     TlsPskClient tls_client_;
     rppairing_tunnel_info_t info_;
-    std::recursive_mutex mutex_;
+    std::mutex send_mutex_;
+    std::mutex close_mutex_;
     std::unordered_map<uint16_t, VirtualTcpStream*> streams_;
     std::mutex streams_mutex_;
+    std::thread reader_thread_;
+    std::atomic<bool> reader_running_{false};
 };
 
 } // namespace rppairing

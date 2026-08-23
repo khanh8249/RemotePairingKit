@@ -157,15 +157,33 @@ void TlsPskClient::disconnect() {
 
 int TlsPskClient::send(const uint8_t* data, size_t len) {
     if (!ssl_ || fd_ == kInvalidSocket) return -1;
-    return SSL_write(ssl_, data, static_cast<int>(len));
+    size_t total = 0;
+    while (total < len) {
+        int w = SSL_write(ssl_, data + total, static_cast<int>(len - total));
+        if (w <= 0) {
+            int err = SSL_get_error(ssl_, w);
+            if (err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) {
+                continue;
+            }
+            return -1;
+        }
+        total += w;
+    }
+    return static_cast<int>(total);
 }
 
 bool TlsPskClient::recv_exact(uint8_t* buf, size_t len, int timeout_ms) {
     size_t total = 0;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms >= 0 ? timeout_ms : 0);
     while (total < len) {
-        int r = recv(buf + total, len - total, timeout_ms);
-        if (r <= 0) return false;
-        total += r;
+        int rem_ms = timeout_ms >= 0
+            ? static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count())
+            : -1;
+        if (timeout_ms >= 0 && rem_ms <= 0) return false;
+
+        int r = recv(buf + total, len - total, rem_ms);
+        if (r < 0) return false;
+        if (r > 0) total += r;
     }
     return true;
 }
@@ -178,11 +196,20 @@ int TlsPskClient::recv(uint8_t* buf, size_t len, int timeout_ms) {
         pfd.fd = fd_;
         pfd.events = POLLIN;
         int p_res = poll(&pfd, 1, timeout_ms);
-        if (p_res <= 0 || !(pfd.revents & POLLIN)) return 0;
+        if (p_res == 0) return 0; // Timeout (non-fatal)
+        if (p_res < 0 || !(pfd.revents & POLLIN)) return -1; // Socket error
         if (!ssl_ || fd_ == kInvalidSocket) return -1;
     }
 
-    return SSL_read(ssl_, buf, static_cast<int>(len));
+    int ret = SSL_read(ssl_, buf, static_cast<int>(len));
+    if (ret <= 0) {
+        int err = SSL_get_error(ssl_, ret);
+        if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+            return 0; // Non-fatal (e.g. TLS control frame / session ticket)
+        }
+        return -1; // Fatal error or clean close
+    }
+    return ret;
 }
 
 } // namespace rppairing
