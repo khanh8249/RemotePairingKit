@@ -31,8 +31,8 @@ static constexpr uint16_t kTcpDefaultWindowSize = 65535;
 // RFC 7323 : 1 MiB Send Window cap for high throughput over virtual tunnel
 static constexpr size_t kTcpDefaultSendWindow = 1 << 20; // 1 MiB
 
-// Maximum retransmission attempts before connection timeout
-static constexpr uint32_t kTcpMaxRetries = 5;
+// Maximum retransmission attempts before connection timeout (RFC 6298: ~60s budget)
+static constexpr uint32_t kTcpMaxRetries = 12;
 
 // RFC 6298: Initial Retransmission Timeout (RTO) in milliseconds
 static constexpr uint64_t kTcpInitialRtoMs = 200;

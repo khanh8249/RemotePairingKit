@@ -178,8 +178,7 @@ int VirtualTcpStream::handle_incoming_packet(const uint8_t* buf, size_t received
                 }
             }
 
-            uint32_t scaled_win = static_cast<uint32_t>(in_win) << 6;
-            peer_window_ = std::max<uint32_t>(scaled_win, kTcpDefaultWindowSize);
+            peer_window_ = in_win;
             notify = true;
         }
 
@@ -205,8 +204,8 @@ int VirtualTcpStream::handle_incoming_packet(const uint8_t* buf, size_t received
                 send_ack = true;
                 notify = true;
                 result = static_cast<int>(payload_len);
-            } else if (static_cast<int32_t>(ack_num_ - in_seq) > 0) {
-                // Duplicate segment: re-ACK without duplicate buffering (jktcp)
+            } else {
+                // Duplicate or out-of-order segment: re-ACK with current ack_num_
                 send_ack = true;
             }
         } else if (in_flags & TCP_FIN) {
@@ -236,7 +235,7 @@ int VirtualTcpStream::handle_incoming_packet(const uint8_t* buf, size_t received
 }
 
 bool VirtualTcpStream::connect(const std::string& server_ip6, uint16_t dest_port, int timeout_ms) {
-    close();
+    if (connected_) return true;
 
     const rppairing_tunnel_info_t* info = tunnel_.info();
     if (!info) return false;
@@ -327,7 +326,12 @@ bool VirtualTcpStream::send(const uint8_t* data, size_t len) {
                         }
                         head.retries++;
                         head.sent_at = std::chrono::steady_clock::now();
-                        send_packet(TCP_PSH | TCP_ACK, head.data.data(), head.data.size(), head.seq);
+                        uint32_t retransmit_seq = head.seq;
+                        std::vector<uint8_t> retransmit_data = head.data;
+
+                        lock.unlock();
+                        send_packet(TCP_PSH | TCP_ACK, retransmit_data.data(), retransmit_data.size(), retransmit_seq);
+                        lock.lock();
                     }
                 }
             }
