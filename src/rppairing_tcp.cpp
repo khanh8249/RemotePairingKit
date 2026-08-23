@@ -72,7 +72,13 @@ bool VirtualTcpStream::send_packet(uint8_t flags, const uint8_t* payload, size_t
     uint16_t tcp_len = 20 + payload_len;
     uint16_t total_len = 40 + tcp_len;
 
-    std::vector<uint8_t> packet(total_len);
+    uint8_t stack_buf[kTcpStackBufferSize];
+    uint8_t* packet = stack_buf;
+    std::vector<uint8_t> heap_buf;
+    if (total_len > sizeof(stack_buf)) {
+        heap_buf.resize(total_len);
+        packet = heap_buf.data();
+    }
 
     // IPv6 Header (40 bytes)
     packet[0] = 0x60; // Version 6
@@ -102,8 +108,8 @@ bool VirtualTcpStream::send_packet(uint8_t flags, const uint8_t* payload, size_t
     tcp[11] = static_cast<uint8_t>(ack_num_ & 0xFF);
     tcp[12] = 0x50; // Data offset: 5 words (20 bytes)
     tcp[13] = flags;
-    tcp[14] = 0xFF; // Window size: 65535
-    tcp[15] = 0xFF;
+    tcp[14] = static_cast<uint8_t>((kTcpDefaultWindowSize >> 8) & 0xFF);
+    tcp[15] = static_cast<uint8_t>(kTcpDefaultWindowSize & 0xFF);
     tcp[16] = 0x00; // Checksum placeholder
     tcp[17] = 0x00;
     tcp[18] = 0x00; // Urgent pointer
@@ -117,7 +123,7 @@ bool VirtualTcpStream::send_packet(uint8_t flags, const uint8_t* payload, size_t
     tcp[16] = static_cast<uint8_t>((csum >> 8) & 0xFF);
     tcp[17] = static_cast<uint8_t>(csum & 0xFF);
 
-    return (tunnel_.send_packet(packet.data(), packet.size()) == RPPAIRING_E_SUCCESS);
+    return (tunnel_.send_packet(packet, total_len) == RPPAIRING_E_SUCCESS);
 }
 
 int VirtualTcpStream::process_incoming(int timeout_ms) {
@@ -161,7 +167,7 @@ int VirtualTcpStream::process_incoming(int timeout_ms) {
     }
 
     if (payload_len > 0) {
-        std::cout << "[VirtualTcp] Recv DATA len=" << payload_len << " (seq=" << in_seq << "), sending ACK..." << std::endl;
+        // std::cout << "[VirtualTcp] Recv DATA len=" << payload_len << " (seq=" << in_seq << "), sending ACK..." << std::endl;
         rx_buffer_.insert(rx_buffer_.end(), &buf[payload_offset], &buf[payload_offset + payload_len]);
         ack_num_ = in_seq + payload_len;
         send_packet(TCP_ACK);
@@ -173,6 +179,10 @@ int VirtualTcpStream::process_incoming(int timeout_ms) {
         send_packet(TCP_ACK);
         connected_ = false;
         return -1;
+    }
+
+    if (in_flags & TCP_ACK) {
+        return 2; // Pure ACK processed
     }
 
     return 0;
@@ -228,12 +238,21 @@ bool VirtualTcpStream::send(const uint8_t* data, size_t len) {
     if (!connected_) return false;
 
     size_t sent = 0;
+    size_t unacked_bytes = 0;
     while (sent < len) {
-        size_t chunk = std::min(len - sent, static_cast<size_t>(1400));
+        size_t chunk = std::min(len - sent, kTcpMss);
         if (!send_packet(TCP_PSH | TCP_ACK, data + sent, chunk)) return false;
         seq_num_ += chunk;
         sent += chunk;
+        unacked_bytes += chunk;
+
+        // Drain pending ACKs periodically to maintain smooth TCP window flow
+        if (unacked_bytes >= 32768) {
+            while (process_incoming(0) > 0) {}
+            unacked_bytes = 0;
+        }
     }
+    while (process_incoming(0) > 0) {}
     return true;
 }
 

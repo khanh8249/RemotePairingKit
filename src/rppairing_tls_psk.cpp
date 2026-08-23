@@ -43,7 +43,7 @@ static unsigned int psk_client_cb(
     return static_cast<unsigned int>(key.size());
 }
 
-TlsPskClient::TlsPskClient() : fd_(-1), ctx_(NULL), ssl_(NULL) {}
+TlsPskClient::TlsPskClient() : fd_(kInvalidSocket), ctx_(NULL), ssl_(NULL) {}
 
 TlsPskClient::~TlsPskClient() {
     disconnect();
@@ -66,10 +66,10 @@ bool TlsPskClient::connect(const char* host, uint16_t port, const uint8_t* psk, 
         return false;
     }
 
-    int sock = -1;
+    int sock = kInvalidSocket;
     for (struct addrinfo* p = res; p != NULL; p = p->ai_next) {
         sock = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-        if (sock < 0) continue;
+        if (sock == kInvalidSocket) continue;
 
         int flags = fcntl(sock, F_GETFL, 0);
         fcntl(sock, F_SETFL, flags | O_NONBLOCK);
@@ -92,16 +92,22 @@ bool TlsPskClient::connect(const char* host, uint16_t port, const uint8_t* psk, 
                 fcntl(sock, F_SETFL, flags);
                 int flag = 1;
                 setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(int));
+                #ifdef SO_NOSIGPIPE
+                setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, (char*)&flag, sizeof(int));
+                #endif
+                int buf_size = kSocketBufferSize;
+                setsockopt(sock, SOL_SOCKET, SO_SNDBUF, (char*)&buf_size, sizeof(buf_size));
+                setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (char*)&buf_size, sizeof(buf_size));
                 break;
             }
         }
 
         close(sock);
-        sock = -1;
+        sock = kInvalidSocket;
     }
 
     freeaddrinfo(res);
-    if (sock < 0) return false;
+    if (sock == kInvalidSocket) return false;
     fd_ = sock;
 
     ctx_ = SSL_CTX_new(TLS_client_method());
@@ -142,9 +148,9 @@ void TlsPskClient::disconnect() {
         SSL_CTX_free(ctx_);
         ctx_ = NULL;
     }
-    if (fd_ >= 0) {
+    if (fd_ != kInvalidSocket) {
         close(fd_);
-        fd_ = -1;
+        fd_ = kInvalidSocket;
     }
     psk_.clear();
 }
@@ -165,7 +171,7 @@ bool TlsPskClient::recv_exact(uint8_t* buf, size_t len, int timeout_ms) {
 }
 
 int TlsPskClient::recv(uint8_t* buf, size_t len, int timeout_ms) {
-    if (!ssl_ || fd_ < 0) return -1;
+    if (!ssl_ || fd_ == kInvalidSocket) return -1;
 
     if (SSL_pending(ssl_) == 0) {
         struct pollfd pfd;

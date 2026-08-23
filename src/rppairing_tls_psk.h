@@ -16,6 +16,9 @@
 
 namespace rppairing {
 
+static constexpr int kInvalidSocket = -1;
+static constexpr int kSocketBufferSize = 2 * 1024 * 1024; // 2 MB
+
 class TlsPskClient {
 public:
     TlsPskClient();
@@ -33,7 +36,7 @@ public:
     const std::vector<uint8_t>& psk() const { return psk_; }
 
 private:
-    int fd_;
+    int fd_ = kInvalidSocket;
     SSL_CTX* ctx_;
     SSL* ssl_;
     std::vector<uint8_t> psk_;

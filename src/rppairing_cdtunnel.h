@@ -17,6 +17,10 @@
 
 namespace rppairing {
 
+static constexpr uint32_t kDefaultCdTunnelMtu = 16000;
+static constexpr size_t kIpv6HeaderLength = 40;
+static constexpr size_t kTcpHeaderLength = 20;
+
 class CdTunnel {
 public:
     CdTunnel();

@@ -104,7 +104,7 @@ rppairing_error_t CdTunnel::connect(
     std::string server_addr = extract_json_string(resp_json, "serverAddress");
     uint32_t rsd_port = extract_json_uint(resp_json, "serverRSDPort");
     uint32_t mtu = extract_json_uint(resp_json, "mtu");
-    if (mtu == 0) mtu = 16000;
+    if (mtu == 0) mtu = kDefaultCdTunnelMtu;
 
     std::strncpy(info_.client_address, client_addr.c_str(), sizeof(info_.client_address) - 1);
     std::strncpy(info_.client_netmask, client_mask.c_str(), sizeof(info_.client_netmask) - 1);
@@ -131,22 +131,22 @@ rppairing_error_t CdTunnel::recv_packet(uint8_t* buf, size_t buf_len, size_t* ou
     if (!is_open()) return RPPAIRING_E_CONN_FAILED;
 
     // IPv6 header is 40 bytes fixed
-    if (buf_len < 40) return RPPAIRING_E_INVALID_ARG;
+    if (buf_len < kIpv6HeaderLength) return RPPAIRING_E_INVALID_ARG;
 
-    if (!tls_client_.recv_exact(buf, 40, timeout_ms)) {
+    if (!tls_client_.recv_exact(buf, kIpv6HeaderLength, timeout_ms)) {
         return RPPAIRING_E_TIMEOUT;
     }
 
     // Bytes [4:6] are Payload Length (big-endian)
     uint16_t payload_len = (static_cast<uint16_t>(buf[4]) << 8) | static_cast<uint16_t>(buf[5]);
-    size_t total_packet_len = 40 + payload_len;
+    size_t total_packet_len = kIpv6HeaderLength + payload_len;
 
     if (total_packet_len > buf_len) {
         return RPPAIRING_E_INVALID_ARG;
     }
 
     if (payload_len > 0) {
-        if (!tls_client_.recv_exact(buf + 40, payload_len, timeout_ms)) {
+        if (!tls_client_.recv_exact(buf + kIpv6HeaderLength, payload_len, timeout_ms)) {
             return RPPAIRING_E_TUNNEL_FAILED;
         }
     }

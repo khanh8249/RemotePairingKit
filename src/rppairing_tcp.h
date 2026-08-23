@@ -18,6 +18,10 @@
 
 namespace rppairing {
 
+static constexpr size_t kTcpMss = 1440;
+static constexpr size_t kTcpStackBufferSize = 2048;
+static constexpr uint16_t kTcpDefaultWindowSize = 65535;
+
 class VirtualTcpStream {
 public:
     VirtualTcpStream(CdTunnel& tunnel);
