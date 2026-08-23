@@ -48,6 +48,7 @@ CdTunnel::~CdTunnel() {
 }
 
 void CdTunnel::close() {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     tls_client_.disconnect();
     std::memset(&info_, 0, sizeof(info_));
 }
@@ -120,6 +121,7 @@ rppairing_error_t CdTunnel::connect(
 }
 
 rppairing_error_t CdTunnel::send_packet(const uint8_t* packet, size_t len) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!is_open()) return RPPAIRING_E_CONN_FAILED;
     if (tls_client_.send(packet, len) != static_cast<int>(len)) {
         return RPPAIRING_E_TUNNEL_FAILED;
@@ -128,6 +130,7 @@ rppairing_error_t CdTunnel::send_packet(const uint8_t* packet, size_t len) {
 }
 
 rppairing_error_t CdTunnel::recv_packet(uint8_t* buf, size_t buf_len, size_t* out_received, int timeout_ms) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!is_open()) return RPPAIRING_E_CONN_FAILED;
 
     // IPv6 header is 40 bytes fixed
