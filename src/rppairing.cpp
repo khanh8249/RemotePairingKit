@@ -63,9 +63,9 @@ static void derive_main_ciphers(rppairing_client_s* client) {
 }
 
 static std::string wrap_plain_message(rppairing_client_s* client, const std::string& inner_json) {
-    client->sequence_number++;
+    uint64_t seq = client->sequence_number++;
     std::ostringstream oss;
-    oss << "{\"message\":{\"plain\":{\"_0\":" << inner_json << "}},\"originatedBy\":\"host\",\"sequenceNumber\":" << client->sequence_number << "}";
+    oss << "{\"message\":{\"plain\":{\"_0\":" << inner_json << "}},\"originatedBy\":\"host\",\"sequenceNumber\":" << seq << "}";
     return oss.str();
 }
 
@@ -101,9 +101,26 @@ static std::string extract_field(const std::string& json, const std::string& fie
     if (pos == std::string::npos) return "";
     pos = json.find("\"", pos);
     if (pos == std::string::npos) return "";
-    size_t end = json.find("\"", pos + 1);
-    if (end == std::string::npos) return "";
-    return json.substr(pos + 1, end - pos - 1);
+
+    size_t end = pos + 1;
+    while (end < json.size()) {
+        if (json[end] == '\"' && json[end - 1] != '\\') break;
+        end++;
+    }
+    if (end >= json.size()) return "";
+
+    std::string val = json.substr(pos + 1, end - pos - 1);
+    std::string clean;
+    for (size_t i = 0; i < val.size(); ++i) {
+        if (val[i] == '\\' && i + 1 < val.size()) {
+            if (val[i + 1] == '/' || val[i + 1] == '\\' || val[i + 1] == '\"') {
+                clean += val[++i];
+                continue;
+            }
+        }
+        clean += val[i];
+    }
+    return clean;
 }
 
 extern "C" {
@@ -153,10 +170,12 @@ rppairing_error_t rppairing_pair_verify(rppairing_client_t client, const rppairi
 
     // Step 1: Send hostOptions request
     std::string opt_json = wrap_plain_message(client, "{\"request\":{\"_0\":{\"handshake\":{\"_0\":{\"hostOptions\":{\"attemptPairVerify\":true},\"wireProtocolVersion\":19}}}}}");
+    LOG_DEBUG("[RPPairing] Step 1 sending hostOptions...");
     if (!client->transport.send_message(opt_json)) return RPPAIRING_E_CONN_FAILED;
 
     std::string resp_json;
     if (!client->transport.recv_message(resp_json)) return RPPAIRING_E_CONN_FAILED;
+    LOG_DEBUG("[RPPairing] Step 1 response: " << resp_json);
 
     // Step 2: Generate ephemeral X25519 keypair
     uint8_t x_priv[32], x_pub[32];
@@ -171,14 +190,16 @@ rppairing_error_t rppairing_pair_verify(rppairing_client_t client, const rppairi
 
     std::ostringstream oss2;
     oss2 << "{\"event\":{\"_0\":{\"pairingData\":{\"_0\":{\"data\":\"" << step2_b64 << "\",\"kind\":\"verifyManualPairing\",\"startNewSession\":true}}}}}";
+    LOG_DEBUG("[RPPairing] Step 2 sending verifyManualPairing (State 1)...");
     if (!client->transport.send_message(wrap_plain_message(client, oss2.str()))) return RPPAIRING_E_CONN_FAILED;
 
     // Step 3: Receive State 0x02 + device X25519 key + encrypted proof
     if (!client->transport.recv_message(resp_json)) return RPPAIRING_E_CONN_FAILED;
+    LOG_DEBUG("[RPPairing] Step 3 response: " << resp_json);
 
     std::string b64_data = extract_field(resp_json, "data");
     if (b64_data.empty()) {
-        // Check if pairVerifyFailed event received
+        LOG_DEBUG("[RPPairing] Step 3 no data in response");
         return RPPAIRING_E_VERIFY_FAILED;
     }
 
@@ -189,6 +210,7 @@ rppairing_error_t rppairing_pair_verify(rppairing_client_t client, const rppairi
     if (!Tlv8::deserialize(tlv_bytes.data(), tlv_bytes.size(), resp_tlvs)) return RPPAIRING_E_MALFORMED_TLV;
 
     if (Tlv8::contains(resp_tlvs, RPPAIRING_TLV_ERROR_RESPONSE)) {
+        LOG_DEBUG("[RPPairing] Step 3 device returned ErrorResponse TLV");
         return RPPAIRING_E_VERIFY_FAILED;
     }
 
@@ -246,10 +268,12 @@ rppairing_error_t rppairing_pair_verify(rppairing_client_t client, const rppairi
 
     std::ostringstream oss7;
     oss7 << "{\"event\":{\"_0\":{\"pairingData\":{\"_0\":{\"data\":\"" << step7_b64 << "\",\"kind\":\"verifyManualPairing\",\"startNewSession\":false}}}}}";
+    LOG_DEBUG("[RPPairing] Step 7 sending verifyManualPairing (State 3)...");
     if (!client->transport.send_message(wrap_plain_message(client, oss7.str()))) return RPPAIRING_E_CONN_FAILED;
 
     // Step 8: Receive State 0x04 verification
     if (!client->transport.recv_message(resp_json)) return RPPAIRING_E_CONN_FAILED;
+    LOG_DEBUG("[RPPairing] Step 8 response: " << resp_json);
 
     std::string final_b64 = extract_field(resp_json, "data");
     if (!final_b64.empty()) {
@@ -258,6 +282,7 @@ rppairing_error_t rppairing_pair_verify(rppairing_client_t client, const rppairi
         std::vector<TlvEntry> final_tlvs;
         Tlv8::deserialize(final_tlv_bytes.data(), final_tlv_bytes.size(), final_tlvs);
         if (Tlv8::contains(final_tlvs, RPPAIRING_TLV_ERROR_RESPONSE)) {
+            LOG_DEBUG("[RPPairing] Step 8 device returned ErrorResponse");
             return RPPAIRING_E_VERIFY_FAILED;
         }
     }
@@ -464,8 +489,7 @@ rppairing_error_t rppairing_create_tunnel_listener(rppairing_client_t client, ui
     oss << "{\"request\":{\"_0\":{\"createListener\":{\"key\":\"" << key_b64 << "\",\"transportProtocolType\":\"tcp\"}}}}";
     std::string req_json = oss.str();
 
-    // Encrypt with client_key
-    client->encrypted_sequence_number++;
+    // Encrypt with client_key using 0-based encrypted sequence number
     uint8_t nonce[12] = {0};
     for (int i = 0; i < 8; ++i) {
         nonce[i] = static_cast<uint8_t>((client->encrypted_sequence_number >> (i * 8)) & 0xFF);
@@ -473,31 +497,48 @@ rppairing_error_t rppairing_create_tunnel_listener(rppairing_client_t client, ui
 
     std::vector<uint8_t> ct;
     if (!Crypto::chacha20_poly1305_encrypt(client->client_key.data(), nonce, NULL, 0, reinterpret_cast<const uint8_t*>(req_json.data()), req_json.size(), ct)) {
+        LOG_DEBUG("[RPPairing] create_tunnel_listener: encryption failed");
         return RPPAIRING_E_CRYPTO_ERROR;
     }
 
     std::string ct_b64 = Crypto::base64_encode(ct.data(), ct.size());
-    client->sequence_number++;
+    uint64_t seq = client->sequence_number++;
     std::ostringstream env_oss;
-    env_oss << "{\"message\":{\"streamEncrypted\":{\"_0\":\"" << ct_b64 << "\"}},\"originatedBy\":\"host\",\"sequenceNumber\":" << client->sequence_number << "}";
+    env_oss << "{\"message\":{\"streamEncrypted\":{\"_0\":\"" << ct_b64 << "\"}},\"originatedBy\":\"host\",\"sequenceNumber\":" << seq << "}";
 
-    if (!client->transport.send_message(env_oss.str())) return RPPAIRING_E_CONN_FAILED;
+    LOG_DEBUG("[RPPairing] create_tunnel_listener: sending encrypted createListener frame (seq " << seq << ")...");
+    if (!client->transport.send_message(env_oss.str())) {
+        LOG_DEBUG("[RPPairing] create_tunnel_listener: send_message failed");
+        return RPPAIRING_E_CONN_FAILED;
+    }
 
     std::string resp_json;
-    if (!client->transport.recv_message(resp_json, 15000)) return RPPAIRING_E_CONN_FAILED;
+    if (!client->transport.recv_message(resp_json, 15000)) {
+        LOG_DEBUG("[RPPairing] create_tunnel_listener: recv_message failed or timed out");
+        return RPPAIRING_E_CONN_FAILED;
+    }
+    LOG_DEBUG("[RPPairing] create_tunnel_listener response: " << resp_json);
 
     std::string enc_resp_b64 = extract_field(resp_json, "_0");
-    if (enc_resp_b64.empty()) return RPPAIRING_E_TUNNEL_FAILED;
+    if (enc_resp_b64.empty()) {
+        LOG_DEBUG("[RPPairing] create_tunnel_listener: missing _0 field in response");
+        return RPPAIRING_E_TUNNEL_FAILED;
+    }
 
     std::vector<uint8_t> enc_resp_ct;
     Crypto::base64_decode(enc_resp_b64, enc_resp_ct);
 
     std::vector<uint8_t> pt_resp;
     if (!Crypto::chacha20_poly1305_decrypt(client->server_key.data(), nonce, NULL, 0, enc_resp_ct.data(), enc_resp_ct.size(), pt_resp)) {
+        LOG_DEBUG("[RPPairing] create_tunnel_listener: decryption failed");
         return RPPAIRING_E_CRYPTO_ERROR;
     }
 
+    client->encrypted_sequence_number++;
+
     std::string dec_json(reinterpret_cast<const char*>(pt_resp.data()), pt_resp.size());
+    LOG_DEBUG("[RPPairing] create_tunnel_listener decrypted response: " << dec_json);
+
     size_t p_pos = dec_json.find("\"port\":");
     if (p_pos == std::string::npos) p_pos = dec_json.find("\"port\" :");
     if (p_pos == std::string::npos) return RPPAIRING_E_TUNNEL_FAILED;
