@@ -11,21 +11,36 @@ let package = Package(
         .library(
             name: "RPPairing",
             targets: ["RPPairing"]
+        ),
+        .library(
+            name: "OpenSSL",
+            targets: ["OpenSSL"]
         )
     ],
+
     dependencies: [],
     targets: [
+        .binaryTarget(
+            name: "OpenSSL",
+            url: "https://github.com/krzyzanowskim/OpenSSL/releases/download/3.6.2000/OpenSSL.xcframework.zip",
+            checksum: "37846a8bd302cb2443eff47f1045ab844d0cd40bf82cc6159cfad9aa5c3eff9e"
+        ),
         .target(
             name: "RPPairing",
-            dependencies: [],
+            dependencies: [
+                .target(name: "OpenSSL")
+            ],
             path: ".",
             exclude: [
                 "CMakeLists.txt",
                 "justfile",
                 "tools",
                 "README.md",
-                "LICENSE"
+                "LICENSE",
+                "libs",
+                "build"
             ],
+
             sources: [
                 "src"
             ],
@@ -33,11 +48,9 @@ let package = Package(
             cxxSettings: [
                 .headerSearchPath("src"),
                 .headerSearchPath("include")
-            ],
-            linkerSettings: [
-                .linkedFramework("OpenSSL")
             ]
         )
     ],
+
     cxxLanguageStandard: .cxx17
 )
